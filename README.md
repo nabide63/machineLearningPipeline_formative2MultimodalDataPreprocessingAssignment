@@ -114,7 +114,7 @@ python main.py
 
 ---
 
-## Tasks & Contributions
+## Tasks & Contributions https://drive.google.com/file/d/1c33Q8iy6c6K5wObpqv9i83Y3JKq_Vs9h/view?usp=sharing
 
 | Task | Owner | Deliverable |
 |---|---|---|

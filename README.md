@@ -1,7 +1,7 @@
 # Multimodal User Identity & Product Recommendation System
 ### Formative 2 – Multimodal Data Preprocessing
 
-> **Team:** Laura (Nabide) · Esther · Rwema · Yusuf
+> **Team:** Laura  · Esther · Rwema · Yusuf
 
 ---
 

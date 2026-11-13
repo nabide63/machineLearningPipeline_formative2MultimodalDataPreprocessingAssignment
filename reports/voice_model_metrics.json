@@ -1,0 +1,33 @@
+{
+  "selected_model": "random_forest",
+  "cv_all_rows": {
+    "accuracy": 0.6805555555555556,
+    "f1_macro": 0.46959691252144087,
+    "log_loss": 0.8199193723974485,
+    "n": 72
+  },
+  "cv_originals_only": {
+    "accuracy": 0.6666666666666666,
+    "f1_macro": 0.4222222222222222,
+    "log_loss": 0.9014136542816432,
+    "n": 12
+  },
+  "distance_threshold": 16.00181039100403,
+  "distance_note": "calibrated: genuine and unauthorized recordings are separable",
+  "genuine_distances": [
+    1.885,
+    2.081,
+    3.515,
+    2.637,
+    0.133,
+    0.164,
+    0.13,
+    0.14
+  ],
+  "unauthorized_distances": [
+    37.452,
+    28.488
+  ],
+  "genuine_accepted_pct": 100.0,
+  "unauthorized_rejected_pct": 100.0
+}

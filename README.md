@@ -159,4 +159,4 @@ Voice file : (audio from someone not in the team)
 | `* 1.*` | *"Yes, approve"* |
 | `* 2.*` | *"Confirm transaction"* |
 
-Members recorded: **Esther**, **Laura** (Nabide), **Rwema**, **Yusuf**
+Members recorded: **Esther**, **Laura** , **Rwema**, **Yusuf**

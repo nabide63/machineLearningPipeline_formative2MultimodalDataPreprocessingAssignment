@@ -142,3 +142,4 @@ out = ROOT / "models" / "product_model_numpy.joblib"
 joblib.dump(bundle, out)
 print(f"\nSaved  {out}")
 print("Metrics:", bundle["test_metrics"])
+

@@ -45,6 +45,8 @@ except ImportError:
     CV2_OK = False
 
 IMAGE_SIZE = (128, 128)
+FACE_CONF_THRESHOLD  = 0.60   # members score 0.92+, unseen faces score ~0.3-0.4
+VOICE_CONF_THRESHOLD = 0.60   # min P(approved) to accept a voice
 
 def preprocess_face_image(image_path: str) -> np.ndarray:
     if not CV2_OK:
@@ -74,6 +76,7 @@ FACE_MODEL_PATH    = MODELS_DIR / "face_model.pkl"
 VOICE_MODEL_PATH   = MODELS_DIR / "voice_model.pkl"
 PRODUCT_MODEL_PATH = MODELS_DIR / "product_model_numpy.joblib"   # pure-numpy version
 FEATURE_STORE_PATH = ROOT / "data" / "customer_feature_store.csv"
+VOICE_SCALER = None   # set in load_models() when the voice bundle has scaler stats
 
 
 class _DummyFace:
@@ -105,6 +108,9 @@ def load_models():
         voice_labels  = voice_bundle["voice_labels"]      # {0: "approved", 1: "denied"}
         approved_idx  = voice_bundle["approved_class_idx"]
         voice_feats   = voice_bundle["feature_cols"]
+        global VOICE_SCALER
+        if "scaler_mean" in voice_bundle:
+            VOICE_SCALER = (np.asarray(voice_bundle["scaler_mean"]), np.asarray(voice_bundle["scaler_std"]))
         print(f"  [OK] Voice model ({voice_bundle['model_name']})")
     else:
         print(f"  [WARN] {VOICE_MODEL_PATH} not found — run scripts/train_voice_model.py")
@@ -156,14 +162,15 @@ def print_welcome(user):
 ╚══════════════════════════════════════════╝""")
 
 def print_recommendation(customer_id, recs, source):
-    print(f"""
-╔══════════════════════════════════════════╗
-║  🛍️   PRODUCT RECOMMENDATION             ║
-║  Customer ID: {customer_id:<27}║
-║  Source: {source:<32}║""")
+    W = 42
+    line = lambda t: print("║" + f"  {t}".ljust(W) + "║")
+    print("\n╔" + "═" * W + "╗")
+    line("PRODUCT RECOMMENDATION")
+    line(f"Customer ID: {customer_id}")
+    line(f"Source: {source[:30]}")
     for rank, (cat, prob) in enumerate(recs, 1):
-        print(f"║  {rank}. {cat:<20} {prob:.1%}              ║".rstrip() + " " * max(0, 44 - len(f"║  {rank}. {cat}  {prob:.1%}")) + "║")
-    print("╚══════════════════════════════════════════╝")
+        line(f"{rank}. {cat:<20} {prob:.1%}")
+    print("╚" + "═" * W + "╝")
 
 def get_file(prompt, exts):
     while True:
@@ -194,9 +201,14 @@ def get_int(prompt):
 def step_face(face_model, face_labels, image_path):
     print(f"\n  🔍 Processing image: {image_path}")
     feats = preprocess_face_image(image_path)
-    pred  = face_model.predict(feats)[0]
-    name  = face_labels.get(int(pred), f"Unknown (class {pred})")
-    authorized = int(pred) in face_labels
+    proba = np.asarray(face_model.predict_proba(feats)[0], dtype=float)
+    best  = int(np.argmax(proba))
+    conf  = float(proba[best])
+    pred  = int(face_model.classes_[best]) if hasattr(face_model, "classes_") else best
+    name  = face_labels.get(pred, f"Unknown (class {pred})")
+    # A closed-set classifier ALWAYS names someone, so require high confidence
+    authorized = (pred in face_labels) and (conf >= FACE_CONF_THRESHOLD)
+    print(f"  Closest match: {name}  (confidence {conf:.0%}, threshold {FACE_CONF_THRESHOLD:.0%})")
     return authorized, name, feats
 
 
@@ -204,69 +216,74 @@ def step_voice(voice_model, approved_idx, voice_feats, audio_path):
     print(f"\n  🎙️  Processing audio: {audio_path}")
     y = af.load_clean(audio_path)
     feat_dict = af.extract_features(y)
-    # Build feature vector in the same column order the model was trained on
     if voice_feats:
         feat_vec = np.array([feat_dict.get(c, 0.0) for c in voice_feats]).reshape(1, -1)
     else:
         feat_vec = np.array(list(feat_dict.values())).reshape(1, -1)
-    pred      = voice_model.predict(feat_vec)[0]
-    approved  = int(pred) == approved_idx
+    if VOICE_SCALER is not None:
+        mu, sd = VOICE_SCALER
+        feat_vec = (feat_vec - mu) / sd
+    proba   = np.asarray(voice_model.predict_proba(feat_vec)[0], dtype=float)
+    classes = list(voice_model.classes_)
+    p_appr  = float(proba[classes.index(approved_idx)]) if approved_idx in classes else 0.0
+    approved = p_appr >= VOICE_CONF_THRESHOLD
+    print(f"  P(approved voice) = {p_appr:.0%}  (threshold {VOICE_CONF_THRESHOLD:.0%})")
     return approved, feat_vec
+
+
+def _load_store_row(customer_id):
+    """Read one customer's row from the feature store with the csv module (no pandas)."""
+    import csv
+    with open(FEATURE_STORE_PATH, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            try:
+                if int(float(row["customer_id"])) == customer_id:
+                    return row
+            except (ValueError, KeyError):
+                continue
+    raise KeyError(f"Customer ID {customer_id} not in feature store")
+
+
+def _to_float(value, default):
+    try:
+        x = float(value)
+        return default if x != x else x      # NaN -> default
+    except (TypeError, ValueError):
+        return default
 
 
 def step_product(product_bundle, customer_id, top_k=3):
     if product_bundle is None:
         return [("Electronics", 0.4), ("Clothing", 0.35), ("Books", 0.25)], "fallback (no model)"
 
-    import pandas as pd
+    model       = product_bundle["model"]
+    classes     = product_bundle["classes"]
+    feat_cols   = product_bundle["feature_cols"]
+    col_medians = product_bundle["col_medians"]
+    fallback    = product_bundle["fallback_distribution"]
 
-    model      = product_bundle["model"]
-    classes    = product_bundle["classes"]
-    feat_cols  = product_bundle["feature_cols"]
-    num_feats  = product_bundle["num_feats"]
-    cat_classes= product_bundle["cat_classes"]
-    col_medians= product_bundle["col_medians"]
-    fallback   = product_bundle["fallback_distribution"]
+    row = _load_store_row(customer_id)        # KeyError -> "Unknown customer ID"
 
-    # Try feature-store lookup for personalised prediction
     try:
-        store = pd.read_csv(FEATURE_STORE_PATH)
-        store["customer_id"] = store["customer_id"].astype(int)
-        store = store.set_index("customer_id")
-
-        if customer_id not in store.index:
-            raise KeyError(f"Customer ID {customer_id} not in feature store")
-
-        row = store.loc[[customer_id]].copy()
-
-        # Encode last_category one-hot
-        last_cat = str(row["last_category"].iloc[0]) if "last_category" in row.columns else "None"
-        for cat in cat_classes:
-            row[f"last_cat_{cat}"] = float(last_cat == cat)
-
-        # has_social_profile as int
-        if "has_social_profile" in row.columns:
-            row["has_social_profile"] = row["has_social_profile"].astype(int)
-
-        # Fill missing numerics with training medians
-        for col in num_feats:
-            if col not in row.columns or pd.isna(row[col].iloc[0]):
-                row[col] = col_medians.get(col, 0.0)
-
-        feat_vec = row[feat_cols].values.astype(float)
+        last_cat = str(row.get("last_category", "None"))
+        values = []
+        for col in feat_cols:
+            if col.startswith("last_cat_"):
+                values.append(float(last_cat == col[len("last_cat_"):]))
+            elif col == "has_social_profile":
+                values.append(1.0 if str(row.get(col, "")).strip().lower() in ("true", "1", "1.0") else 0.0)
+            else:
+                values.append(_to_float(row.get(col), col_medians.get(col, 0.0)))
+        feat_vec = np.array(values, dtype=float).reshape(1, -1)
         proba    = model.predict_proba(feat_vec)[0]
         source   = product_bundle["model_name"]
-
-    except KeyError as e:
-        raise
     except Exception as e:
-        # Fallback to popularity distribution
-        proba  = list(fallback.values())
+        proba   = list(fallback.values())
         classes = list(fallback.keys())
         source  = f"popularity fallback ({e})"
 
     pairs = sorted(zip(classes, proba), key=lambda x: -x[1])[:top_k]
-    return [(cat, round(float(p), 3)) for cat, p in pairs], source
+    return [(str(cat), round(float(pr), 3)) for cat, pr in pairs], source
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
